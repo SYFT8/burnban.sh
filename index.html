@@ -1,19 +1,86 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>burnban.sh — installer</title>
-<meta http-equiv="refresh" content="5;url=https://burnban.dev">
+<title>burnban — launching soon</title>
+<meta name="description" content="burnban: the local meter that caps what your AI agents spend. Public launch Tuesday, 14 July 2026, 9:00 AM ET. Get one email at release.">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src https://us.i.posthog.com; base-uri 'none'; form-action 'none'">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 4.7C9.5 7.5 8.1 9.7 8.1 12.2a3.9 3.9 0 0 0 7.8 0c0-2.5-1.4-4.7-3.9-7.5Z' fill='%23ff7a1a'/%3E%3Ccircle cx='12' cy='12' r='10' fill='none' stroke='%23ff7a1a' stroke-width='1.8'/%3E%3Cpath d='M5.3 5.3 18.7 18.7' stroke='%23141412' stroke-width='3.4'/%3E%3Cpath d='M5.3 5.3 18.7 18.7' stroke='%23ff7a1a' stroke-width='1.9'/%3E%3C/svg%3E">
 <style>
-body{background:#131311;color:#ece9e0;font-family:'Avenir Next','Gill Sans',Candara,'Trebuchet MS',sans-serif;display:grid;place-items:center;min-height:100vh;margin:0}
-main{text-align:center;padding:24px}
-.mark{display:inline-flex;align-items:center;gap:10px;font-weight:700;font-size:18px;letter-spacing:-.02em;margin-bottom:22px}
-.mark svg{width:24px;height:24px}
-code{display:inline-block;background:#191917;border:1px solid #2c2c28;border-radius:8px;padding:15px 22px;color:#ffb066;font-size:14px;font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace}
-p{color:#88877d;font-size:13px;margin-top:18px}a{color:#ece9e0}
+:root{--bg:#131311;--ink:#ece9e0;--dim:#88877d;--faint:#5f5e56;--ember:#ff7a1a;--ember-hi:#ffb066;--line:#2c2c28;--card:#191917;--pine:#8FC7A4;--sig:#FF6A57}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:'Avenir Next','Gill Sans',Candara,'Trebuchet MS',sans-serif;display:grid;place-items:center;min-height:100vh;padding:28px}
+main{text-align:center;max-width:560px;width:100%}
+.mark{display:inline-flex;align-items:center;gap:11px;font-weight:700;font-size:19px;letter-spacing:-.02em;margin-bottom:30px}
+.mark svg{width:26px;height:26px}
+.eyebrow{font-family:'SFMono-Regular',Consolas,monospace;font-size:10.5px;font-weight:600;letter-spacing:.24em;text-transform:uppercase;color:var(--ember);margin-bottom:14px}
+h1{font-size:clamp(30px,6vw,44px);font-weight:750;letter-spacing:-.03em;line-height:1.02;margin-bottom:16px}
+h1 .act{color:var(--ember)}
+.sub{color:var(--dim);font-size:15px;line-height:1.55;max-width:430px;margin:0 auto 26px}
+.cd{display:inline-flex;gap:12px;margin:0 auto 30px;font-family:'SFMono-Regular',Consolas,monospace}
+.cd .u{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 4px;min-width:64px}
+.cd b{display:block;font-size:26px;font-weight:700;color:var(--ink);line-height:1}
+.cd small{display:block;font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin-top:7px}
+form{display:inline-flex;align-items:stretch;border:1px solid var(--line);background:var(--card);border-radius:8px;overflow:hidden;max-width:100%}
+input{font-family:'SFMono-Regular',Consolas,monospace;padding:15px 20px;font-size:14px;color:var(--ink);background:transparent;border:0;outline:0;min-width:min(290px,64vw)}
+input::placeholder{color:var(--faint)}
+button{font-family:'SFMono-Regular',Consolas,monospace;font-size:10.5px;font-weight:700;letter-spacing:.16em;cursor:pointer;background:transparent;color:var(--ember-hi);border:0;border-left:1px solid var(--line);padding:0 20px;transition:all .18s;white-space:nowrap}
+button:hover{background:var(--ember);color:#131311}
+button:disabled{opacity:.55;cursor:default}
+.msg{font-family:'SFMono-Regular',Consolas,monospace;font-size:11.5px;color:var(--dim);margin-top:14px;min-height:1.2em}
+.msg.ok{color:var(--pine)}.msg.err{color:var(--sig)}
+.foot{color:var(--faint);font-size:12px;margin-top:30px}
+.foot a{color:var(--dim)}
+@media(max-width:560px){form{display:flex;width:100%}input{flex:1;min-width:0;padding:14px}button{padding:0 15px}}
 </style></head><body><main>
 <div class="mark"><svg viewBox="0 0 24 24"><path d="M12 4.7C9.5 7.5 8.1 9.7 8.1 12.2a3.9 3.9 0 0 0 7.8 0c0-2.5-1.4-4.7-3.9-7.5Z" fill="#ff7a1a"/><circle cx="12" cy="12" r="10" fill="none" stroke="#ff7a1a" stroke-width="1.8"/><path d="M5.3 5.3 18.7 18.7" stroke="#131311" stroke-width="3.4"/><path d="M5.3 5.3 18.7 18.7" stroke="#ff7a1a" stroke-width="1.8"/></svg> burnban</div>
-<div><code>curl -fsSL https://burnban.sh/install | sh</code></div>
-<p>taking you to <a href="https://burnban.dev">burnban.dev</a>…</p>
-</main></body></html>
+<p class="eyebrow">Public launch · Tue 14 Jul 2026 · 9:00 AM ET</p>
+<h1>The meter goes<br><span class="act">live in</span></h1>
+<div class="cd" id="cd" role="timer" aria-label="Time until launch">
+  <div class="u"><b id="d">–</b><small>days</small></div>
+  <div class="u"><b id="h">–</b><small>hrs</small></div>
+  <div class="u"><b id="m">–</b><small>min</small></div>
+  <div class="u"><b id="s">–</b><small>sec</small></div>
+</div>
+<p class="sub">burnban is a local control layer that meters, itemizes, and caps what your AI agents spend. Drop your email — we send <b style="color:var(--ink);font-weight:500">one</b> message the moment the CLI ships. No list, no spam.</p>
+<form id="notify" novalidate>
+  <input type="email" name="email" required placeholder="you@company.com" aria-label="Email address for launch notification" autocomplete="email" spellcheck="false">
+  <button type="submit">NOTIFY ME</button>
+</form>
+<p class="msg" id="msg" role="status" aria-live="polite"></p>
+<p class="foot">Read the full instrument sheet at <a href="https://burnban.dev">burnban.dev</a> · MIT © Oday Brahem</p>
+</main>
+<script>
+/* live countdown to Tue 14 Jul 2026 09:00 America/New_York (EDT, UTC-4) */
+var target=new Date('2026-07-14T09:00:00-04:00').getTime();
+function pad(n){return(n<10?'0':'')+n}
+function tick(){
+  var t=target-Date.now();
+  if(t<0)t=0;
+  var s=Math.floor(t/1000);
+  document.getElementById('d').textContent=Math.floor(s/86400);
+  document.getElementById('h').textContent=pad(Math.floor(s%86400/3600));
+  document.getElementById('m').textContent=pad(Math.floor(s%3600/60));
+  document.getElementById('s').textContent=pad(s%60);
+}
+tick();setInterval(tick,1000);
+
+/* email capture — explicit opt-in only; nothing fires until you submit */
+var PH='phc_jaTlY8W4OJww9kdgnoEZG6lXsONMjZJagVZxglMChi7';
+var f=document.getElementById('notify'),msg=document.getElementById('msg');
+f.addEventListener('submit',function(e){
+  e.preventDefault();
+  var email=(f.email.value||'').trim();
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){msg.textContent='Enter a valid email address.';msg.className='msg err';return;}
+  var btn=f.querySelector('button'),label=btn.textContent;btn.disabled=true;btn.textContent='SENDING…';
+  fetch('https://us.i.posthog.com/i/v0/e/',{method:'POST',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({
+    api_key:PH,event:'burnban_waitlist_signup',distinct_id:email,
+    properties:{email:email,source:'burnban.sh',$set:{email:email,waitlist:true}}
+  })}).then(function(r){
+    if(!r.ok)throw 0;
+    f.reset();msg.textContent="You're on the list — we'll email you at launch.";msg.className='msg ok';
+  }).catch(function(){
+    msg.textContent='Something went wrong — email hello@burnban.dev and we’ll add you.';msg.className='msg err';
+  }).then(function(){btn.disabled=false;btn.textContent=label;});
+});
+</script>
+</body></html>
