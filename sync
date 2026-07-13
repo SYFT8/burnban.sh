@@ -1,0 +1,246 @@
+#!/bin/sh
+# Burnban Personal Sync installer for macOS and Linux.
+set -eu
+umask 077
+
+RELEASE_REPO="SYFT8/burnban.dev"
+VERSION="${BURNBAN_SYNC_VERSION:-v0.1.0}"
+BASE_URL="${BURNBAN_SYNC_DOWNLOAD_BASE_URL:-https://github.com/$RELEASE_REPO/releases/download/burnban-sync-$VERSION}"
+BIN_DIR="${BURNBAN_SYNC_INSTALL_DIR:-$HOME/.local/bin}"
+BIN_PATH="$BIN_DIR/burnban-sync"
+STATE_PATH="${BURNBAN_SYNC_STATE:-$HOME/.burnban/personal-sync.json}"
+SERVER_URL="${BURNBAN_SYNC_URL:-https://sync.burnban.dev}"
+NO_START="${BURNBAN_SYNC_NO_START:-0}"
+SKIP_ENROLL="${BURNBAN_SYNC_SKIP_ENROLL:-0}"
+UNINSTALL=0
+
+usage() {
+  cat <<'EOF'
+usage: install-sync.sh [--uninstall]
+
+Installs or upgrades burnban-sync and configures a per-user LaunchAgent on
+macOS or systemd user service on Linux. Uninstall preserves enrollment state.
+
+Environment:
+  BURNBAN_SYNC_VERSION=...            release version (default: v0.1.0)
+  BURNBAN_SYNC_DOWNLOAD_BASE_URL=...  HTTPS URL or local artifact directory
+  BURNBAN_SYNC_INSTALL_DIR=...        binary directory (default: ~/.local/bin)
+  BURNBAN_SYNC_URL=...                enrollment service URL
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --uninstall) UNINSTALL=1 ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "burnban-sync: unknown installer option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+reject_newline() {
+  case "$1" in
+    *'
+'*) echo "burnban-sync: paths containing newlines are not supported" >&2; exit 2 ;;
+  esac
+}
+for value in "$BIN_DIR" "$STATE_PATH" "$BASE_URL"; do reject_newline "$value"; done
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$OS" in
+  darwin|linux) ;;
+  *) echo "burnban-sync: unsupported operating system: $OS" >&2; exit 1 ;;
+esac
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64|amd64) ARCH=amd64 ;;
+  arm64|aarch64) ARCH=arm64 ;;
+  *) echo "burnban-sync: unsupported architecture: $ARCH" >&2; exit 1 ;;
+esac
+
+if [ "$OS" = darwin ]; then
+  SERVICE_PATH="${BURNBAN_SYNC_SERVICE_PATH:-$HOME/Library/LaunchAgents/dev.burnban.sync.plist}"
+else
+  SERVICE_PATH="${BURNBAN_SYNC_SERVICE_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/burnban-sync.service}"
+fi
+reject_newline "$SERVICE_PATH"
+
+managed_service() {
+  [ -f "$SERVICE_PATH" ] && grep -Fq 'Burnban installer managed service' "$SERVICE_PATH"
+}
+
+stop_service() {
+  [ "$NO_START" = 1 ] && return 0
+  if [ "$OS" = darwin ]; then
+    launchctl bootout "gui/$(id -u)" "$SERVICE_PATH" >/dev/null 2>&1 || true
+  elif command -v systemctl >/dev/null 2>&1; then
+    systemctl --user disable --now burnban-sync.service >/dev/null 2>&1 || true
+  fi
+}
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  stop_service
+  if [ -e "$SERVICE_PATH" ]; then
+    if managed_service; then
+      rm -f "$SERVICE_PATH"
+    else
+      echo "burnban-sync: refusing to remove an unrecognized service file: $SERVICE_PATH" >&2
+      exit 1
+    fi
+  fi
+  if [ "$NO_START" != 1 ] && [ "$OS" = linux ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  if [ -e "$BIN_PATH" ]; then
+    if [ -x "$BIN_PATH" ] && "$BIN_PATH" --version 2>/dev/null | grep -q '^burnban-sync '; then
+      rm -f "$BIN_PATH"
+    else
+      echo "burnban-sync: refusing to remove a file that is not burnban-sync: $BIN_PATH" >&2
+      exit 1
+    fi
+  fi
+  echo "burnban-sync removed; enrollment state retained at $STATE_PATH"
+  exit 0
+fi
+
+ARCHIVE="burnban-sync_${OS}_${ARCH}.tar.gz"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/burnban-sync-install.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+fetch() {
+  name=$1
+  destination=$2
+  if [ -d "$BASE_URL" ]; then
+    cp "$BASE_URL/$name" "$destination"
+    return
+  fi
+  case "$BASE_URL" in
+    https://*) ;;
+    *) echo "burnban-sync: remote downloads must use HTTPS" >&2; exit 1 ;;
+  esac
+  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+    "$BASE_URL/$name" -o "$destination"
+}
+
+echo "Downloading burnban-sync $VERSION for $OS/$ARCH..."
+if ! fetch checksums.txt "$TMP/checksums.txt"; then
+  echo "burnban-sync: release $VERSION is not buyer-accessible yet; retry after the published launch" >&2
+  exit 1
+fi
+fetch "$ARCHIVE" "$TMP/$ARCHIVE"
+expected=$(awk -v file="$ARCHIVE" '$2 == file {print $1; found=1} END {if (!found) exit 1}' "$TMP/checksums.txt") || {
+  echo "burnban-sync: $ARCHIVE is missing from checksums.txt" >&2
+  exit 1
+}
+case "$expected" in
+  *[!0-9a-fA-F]*|'') echo "burnban-sync: invalid checksum for $ARCHIVE" >&2; exit 1 ;;
+esac
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
+else
+  actual=$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{print $1}')
+fi
+if [ "$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" ]; then
+  echo "burnban-sync: checksum verification failed for $ARCHIVE" >&2
+  exit 1
+fi
+
+mkdir -p "$TMP/extract" "$BIN_DIR"
+tar -xzf "$TMP/$ARCHIVE" -C "$TMP/extract"
+candidate="$TMP/extract/burnban-sync"
+if [ ! -f "$candidate" ]; then
+  echo "burnban-sync: release archive does not contain burnban-sync" >&2
+  exit 1
+fi
+chmod 755 "$candidate"
+if ! "$candidate" --version 2>/dev/null | grep -q '^burnban-sync '; then
+  echo "burnban-sync: downloaded executable failed validation" >&2
+  exit 1
+fi
+
+if [ -e "$BIN_PATH" ] && { [ ! -x "$BIN_PATH" ] || ! "$BIN_PATH" --version 2>/dev/null | grep -q '^burnban-sync '; }; then
+  echo "burnban-sync: refusing to replace a file that is not burnban-sync: $BIN_PATH" >&2
+  exit 1
+fi
+if [ -e "$SERVICE_PATH" ] && ! managed_service; then
+  echo "burnban-sync: refusing to replace an unrecognized service file: $SERVICE_PATH" >&2
+  exit 1
+fi
+
+stop_service
+stage="$BIN_DIR/.burnban-sync.$$"
+cp "$candidate" "$stage"
+chmod 755 "$stage"
+mv -f "$stage" "$BIN_PATH"
+
+if [ ! -f "$STATE_PATH" ] && [ "$SKIP_ENROLL" != 1 ]; then
+  ledger="${BURNBAN_DB:-$HOME/.burnban/burnban.db}"
+  if [ ! -f "$ledger" ]; then
+    echo "burnban-sync: initialize the free meter first with: burnban setup --if-needed --no-launch" >&2
+    exit 1
+  fi
+  if [ ! -r /dev/tty ]; then
+    echo "burnban-sync: enrollment requires an interactive terminal" >&2
+    exit 1
+  fi
+  # The installer is commonly run as `curl ... | sh`, so stdin belongs to the
+  # script pipe. Reconnect only the hidden enrollment prompt to the terminal.
+  BURNBAN_SYNC_URL="$SERVER_URL" "$BIN_PATH" --enroll </dev/tty
+fi
+
+mkdir -p "$(dirname "$SERVICE_PATH")" "$HOME/.burnban"
+if [ "$OS" = darwin ]; then
+  xml_path=$(printf '%s' "$BIN_PATH" | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/"/\&quot;/g')
+  xml_out=$(printf '%s' "$HOME/.burnban/burnban-sync.log" | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/"/\&quot;/g')
+  cat >"$SERVICE_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Burnban installer managed service -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.burnban.sync</string>
+<key>ProgramArguments</key><array><string>$xml_path</string></array>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>15</integer>
+<key>StandardOutPath</key><string>$xml_out</string>
+<key>StandardErrorPath</key><string>$xml_out</string>
+</dict></plist>
+EOF
+  chmod 600 "$SERVICE_PATH"
+  if [ "$NO_START" != 1 ] && [ -f "$STATE_PATH" ]; then
+    launchctl bootstrap "gui/$(id -u)" "$SERVICE_PATH"
+  fi
+else
+  unit_path=$(printf '%s' "$BIN_PATH" | sed 's/\\/\\\\/g;s/"/\\"/g;s/%/%%/g')
+  cat >"$SERVICE_PATH" <<EOF
+# Burnban installer managed service
+[Unit]
+Description=Burnban Personal Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="$unit_path"
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+EOF
+  chmod 600 "$SERVICE_PATH"
+  if [ "$NO_START" != 1 ] && [ -f "$STATE_PATH" ]; then
+    command -v systemctl >/dev/null 2>&1 || {
+      echo "burnban-sync: systemd is required for the Linux user service" >&2
+      exit 1
+    }
+    systemctl --user daemon-reload
+    systemctl --user enable --now burnban-sync.service
+  fi
+fi
+
+echo "burnban-sync installed: $BIN_PATH"
+if [ -f "$STATE_PATH" ]; then
+  echo "Personal Sync is enrolled and supervised for this user."
+else
+  echo "Enrollment was skipped; the supervisor will remain stopped until state exists."
+fi
