@@ -36,7 +36,7 @@ jobs:
           grep -F 'Free meter available now · Sync release pending' index.html >/dev/null
           grep -F 'is not buyer-accessible yet; retry after the published launch' sync >/dev/null
           grep -F 'is not buyer-accessible yet; retry after the published launch' sync.ps1 >/dev/null
-          if git grep -n -E 'ph[cx]_|posthog[.]com' -- .; then
+          if git grep -n -i -E 'ph[cx]_|posthog[.]com' -- .; then
             echo "PostHog token or endpoint must not be present in the current installer site" >&2
             exit 1
           fi

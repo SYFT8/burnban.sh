@@ -72,7 +72,19 @@ function Get-SyncArtifact([string]$Name, [string]$Destination) {
     }
     $Uri = [Uri]($BaseUrl.TrimEnd('/') + "/" + $Name)
     if ($Uri.Scheme -ne "https") { throw "Remote release downloads must use HTTPS: $Uri" }
-    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+    $Response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -PassThru
+    # Windows PowerShell exposes ResponseUri; PowerShell 7 exposes the final
+    # RequestUri. Validate the redirect destination as well as the initial URL.
+    $FinalUri = $null
+    if ($null -ne $Response.BaseResponse.ResponseUri) {
+        $FinalUri = [Uri]$Response.BaseResponse.ResponseUri
+    } elseif ($null -ne $Response.BaseResponse.RequestMessage) {
+        $FinalUri = [Uri]$Response.BaseResponse.RequestMessage.RequestUri
+    }
+    if ($null -eq $FinalUri -or $FinalUri.Scheme -ne "https") {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        throw "Remote release redirect did not end on HTTPS: $FinalUri"
+    }
 }
 
 try {
