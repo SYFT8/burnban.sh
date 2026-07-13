@@ -1,0 +1,44 @@
+name: verify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.25.12
+          cache: false
+      - name: Validate installer source
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n install sync
+          shellcheck install sync
+          pwsh -NoLogo -NoProfile -Command \
+            '[void][scriptblock]::Create((Get-Content -Raw install.ps1)); [void][scriptblock]::Create((Get-Content -Raw sync.ps1))'
+          grep -F 'Free meter available now · Sync release pending' index.html >/dev/null
+          grep -F 'is not buyer-accessible yet; retry after the published launch' sync >/dev/null
+          grep -F 'is not buyer-accessible yet; retry after the published launch' sync.ps1 >/dev/null
+          if git grep -n -E 'ph[cx]_' -- .; then
+            echo "PostHog token pattern must not be present in the current installer site" >&2
+            exit 1
+          fi
+      - name: Run default gitleaks history rules
+        run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --redact --no-banner .
