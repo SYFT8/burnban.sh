@@ -1,12 +1,31 @@
 param([switch]$Uninstall, [switch]$NoStart, [switch]$SkipEnroll)
 
 $ErrorActionPreference = "Stop"
-$Repo = "SYFT8/burnban.dev"
-$Version = if ($env:BURNBAN_SYNC_VERSION) { $env:BURNBAN_SYNC_VERSION } else { "v0.1.0" }
+$AccountToken = $null
+$SecureToken = $null
+$Pointer = [IntPtr]::Zero
+$PreviousToken = $null
+$PreviousUrl = $null
+$Temp = $null
+
+try {
+
+function Normalize-SyncVersion([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "BURNBAN_SYNC_VERSION must be a release version such as v0.2.0"
+    }
+    $Normalized = if ($Value.StartsWith("v", [StringComparison]::Ordinal)) { $Value.Substring(1) } else { $Value }
+    if ($Normalized -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+        throw "BURNBAN_SYNC_VERSION must be a release version such as v0.2.0"
+    }
+    return $Normalized
+}
+
+$VersionInput = if ($env:BURNBAN_SYNC_VERSION) { $env:BURNBAN_SYNC_VERSION } else { "v0.2.0" }
 $BaseUrl = if ($env:BURNBAN_SYNC_DOWNLOAD_BASE_URL) {
     $env:BURNBAN_SYNC_DOWNLOAD_BASE_URL
 } else {
-    "https://github.com/$Repo/releases/download/burnban-sync-$Version"
+    ""
 }
 $InstallDir = if ($env:BURNBAN_SYNC_INSTALL_DIR) {
     $env:BURNBAN_SYNC_INSTALL_DIR
@@ -20,26 +39,39 @@ $StatePath = if ($env:BURNBAN_SYNC_STATE) {
     Join-Path ([Environment]::GetFolderPath("UserProfile")) ".burnban\personal-sync.json"
 }
 $ServerUrl = if ($env:BURNBAN_SYNC_URL) { $env:BURNBAN_SYNC_URL } else { "https://sync.burnban.dev" }
-$TaskName = "Burnban Personal Sync"
+$TaskName = "Burnban Sync"
+$LegacyTaskName = "Burnban Personal Sync"
 $NoStart = $NoStart -or $env:BURNBAN_SYNC_NO_START -eq "1"
 $SkipEnroll = $SkipEnroll -or $env:BURNBAN_SYNC_SKIP_ENROLL -eq "1"
 
-function Test-SyncBinary([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+function Get-SyncBinaryVersion([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     try {
-        $Output = & $Path --version 2>$null
-        return ($LASTEXITCODE -eq 0 -and "$Output" -match '^burnban-sync\s')
-    } catch { return $false }
+        $Output = @(& $Path --version 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $Output.Count -ne 1) { return $null }
+        $Line = [string]$Output[0]
+        if ($Line -cnotmatch '^burnban-sync ([^\s]+)$') { return $null }
+        $ReportedVersion = $Matches[1]
+        try { return Normalize-SyncVersion $ReportedVersion } catch { return $null }
+    } catch { return $null }
+}
+
+function Test-SyncBinary([string]$Path, [string]$ExpectedVersion = "") {
+    $FoundVersion = Get-SyncBinaryVersion $Path
+    if ([string]::IsNullOrEmpty($FoundVersion)) { return $false }
+    return [string]::IsNullOrEmpty($ExpectedVersion) -or $FoundVersion -ceq $ExpectedVersion
 }
 
 function Remove-SyncTask {
-    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($null -ne $Task) {
-        if ($Task.Description -ne "Burnban installer managed service") {
-            throw "Refusing to remove an unrecognized scheduled task: $TaskName"
+    foreach ($Name in @($TaskName, $LegacyTaskName)) {
+        $Task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+        if ($null -ne $Task) {
+            if ($Task.Description -ne "Burnban installer managed service") {
+                throw "Refusing to remove an unrecognized scheduled task: $Name"
+            }
+            Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $Name -Confirm:$false
         }
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     }
 }
 
@@ -55,6 +87,15 @@ if ($Uninstall -or $env:BURNBAN_SYNC_UNINSTALL -eq "1") {
     exit 0
 }
 
+$RequestedVersion = Normalize-SyncVersion $VersionInput
+$Version = "v$RequestedVersion"
+$AllowTestRemoteBaseUrl = $false
+if (-not [string]::IsNullOrEmpty($env:BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL)) {
+    if (-not [bool]::TryParse($env:BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL, [ref]$AllowTestRemoteBaseUrl)) {
+        throw "BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL must be true or false"
+    }
+}
+
 $Architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 switch ($Architecture.ToUpperInvariant()) {
     "AMD64" { $Arch = "amd64" }
@@ -64,37 +105,70 @@ switch ($Architecture.ToUpperInvariant()) {
 $Archive = "burnban-sync_windows_$Arch.zip"
 $Temp = Join-Path ([IO.Path]::GetTempPath()) ("burnban-sync-install-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $Temp | Out-Null
+    $AccountToken = $env:BURNBAN_SYNC_ACCOUNT_TOKEN
+    $LocalRelease = $BaseUrl -and (Test-Path -LiteralPath $BaseUrl -PathType Container)
+    $Product = "Paid Sync"
+    if (-not $LocalRelease) {
+        if (-not $AccountToken) {
+            $SecureToken = Read-Host "Paste the pst_ Personal or tst_ Team management token" -AsSecureString
+            $Pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureToken)
+            try {
+                $AccountToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Pointer)
+            } finally {
+                [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Pointer)
+                $Pointer = [IntPtr]::Zero
+                $SecureToken.Dispose()
+                $SecureToken = $null
+            }
+        }
+        if ($AccountToken -match '^pst_[A-Za-z0-9_-]{16,}$') {
+            $Product = "Personal Sync"
+            $ReleaseProduct = "personal"
+        } elseif ($AccountToken -match '^tst_[A-Za-z0-9_-]{16,}$') {
+            $Product = "Team Sync"
+            $ReleaseProduct = "team"
+        } else {
+            throw "A valid pst_ Personal or tst_ Team management token is required"
+        }
+        $ProductionBaseUrl = "https://sync.burnban.dev/api/v1/$ReleaseProduct/releases/$Version"
+        if (-not $BaseUrl) {
+            $BaseUrl = $ProductionBaseUrl
+        } elseif (-not $AllowTestRemoteBaseUrl -and
+                  -not [string]::Equals($BaseUrl, $ProductionBaseUrl, [StringComparison]::Ordinal)) {
+            throw "Refusing to send a paid token to a non-production artifact URL; only tests may set BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL=true"
+        }
+    }
 
-function Get-SyncArtifact([string]$Name, [string]$Destination) {
-    if (Test-Path -LiteralPath $BaseUrl -PathType Container) {
-        Copy-Item -LiteralPath (Join-Path $BaseUrl $Name) -Destination $Destination
-        return
+    function Get-SyncArtifact([string]$Name, [string]$Destination) {
+        if (Test-Path -LiteralPath $BaseUrl -PathType Container) {
+            Copy-Item -LiteralPath (Join-Path $BaseUrl $Name) -Destination $Destination
+            return
+        }
+        $Uri = [Uri]($BaseUrl.TrimEnd('/') + "/" + $Name)
+        if ($Uri.Scheme -ne "https") { throw "Remote release downloads must use HTTPS: $Uri" }
+        $Headers = @{ Authorization = "Bearer $AccountToken" }
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Headers $Headers -MaximumRedirection 0 -OutFile $Destination -PassThru
+        # Windows PowerShell exposes ResponseUri; PowerShell 7 exposes the final
+        # RequestUri. Validate the redirect destination as well as the initial URL.
+        $FinalUri = $null
+        if ($null -ne $Response.BaseResponse.ResponseUri) {
+            $FinalUri = [Uri]$Response.BaseResponse.ResponseUri
+        } elseif ($null -ne $Response.BaseResponse.RequestMessage) {
+            $FinalUri = [Uri]$Response.BaseResponse.RequestMessage.RequestUri
+        }
+        if ($null -eq $FinalUri -or $FinalUri.Scheme -ne "https" -or $FinalUri.AbsoluteUri -ne $Uri.AbsoluteUri) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            throw "Remote release response changed the authenticated download URL: $FinalUri"
+        }
     }
-    $Uri = [Uri]($BaseUrl.TrimEnd('/') + "/" + $Name)
-    if ($Uri.Scheme -ne "https") { throw "Remote release downloads must use HTTPS: $Uri" }
-    $Response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -PassThru
-    # Windows PowerShell exposes ResponseUri; PowerShell 7 exposes the final
-    # RequestUri. Validate the redirect destination as well as the initial URL.
-    $FinalUri = $null
-    if ($null -ne $Response.BaseResponse.ResponseUri) {
-        $FinalUri = [Uri]$Response.BaseResponse.ResponseUri
-    } elseif ($null -ne $Response.BaseResponse.RequestMessage) {
-        $FinalUri = [Uri]$Response.BaseResponse.RequestMessage.RequestUri
-    }
-    if ($null -eq $FinalUri -or $FinalUri.Scheme -ne "https") {
-        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-        throw "Remote release redirect did not end on HTTPS: $FinalUri"
-    }
-}
 
-try {
     Write-Host "Downloading burnban-sync $Version for windows/$Arch..."
     $Zip = Join-Path $Temp $Archive
     $Checksums = Join-Path $Temp "checksums.txt"
     try {
         Get-SyncArtifact "checksums.txt" $Checksums
     } catch {
-        throw "burnban-sync release $Version is not buyer-accessible yet; retry after the published launch. $($_.Exception.Message)"
+        throw "The paid account could not download burnban-sync release $Version. $($_.Exception.Message)"
     }
     Get-SyncArtifact $Archive $Zip
     $ChecksumLine = Get-Content $Checksums | Where-Object { $_ -match ("\s" + [Regex]::Escape($Archive) + "$") } | Select-Object -First 1
@@ -106,7 +180,9 @@ try {
     $Extracted = Join-Path $Temp "extract"
     Expand-Archive -LiteralPath $Zip -DestinationPath $Extracted
     $Candidate = Join-Path $Extracted "burnban-sync.exe"
-    if (-not (Test-SyncBinary $Candidate)) { throw "Downloaded executable failed validation" }
+    if (-not (Test-SyncBinary $Candidate $RequestedVersion)) {
+        throw "Downloaded executable is not the requested release $Version"
+    }
 
     Remove-SyncTask
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -119,7 +195,9 @@ try {
     }
     try {
         Move-Item -LiteralPath $Stage -Destination $Binary
-        if (-not (Test-SyncBinary $Binary)) { throw "Installed executable failed validation" }
+        if (-not (Test-SyncBinary $Binary $RequestedVersion)) {
+            throw "Installed executable is not the requested release $Version"
+        }
         Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
     } catch {
         Remove-Item -LiteralPath $Binary -Force -ErrorAction SilentlyContinue
@@ -128,20 +206,36 @@ try {
         throw
     }
 
-    if (-not (Test-Path -LiteralPath $StatePath) -and -not $SkipEnroll) {
-        $Ledger = if ($env:BURNBAN_DB) { $env:BURNBAN_DB } else { Join-Path ([Environment]::GetFolderPath("UserProfile")) ".burnban\burnban.db" }
-        if (-not (Test-Path -LiteralPath $Ledger -PathType Leaf)) {
-            throw "Initialize the free meter first with: burnban setup --if-needed --no-launch"
-        }
-        $PreviousUrl = $env:BURNBAN_SYNC_URL
-        try {
-            $env:BURNBAN_SYNC_URL = $ServerUrl
-            & $Binary --enroll
-            if ($LASTEXITCODE -ne 0) { throw "Personal Sync enrollment failed" }
-        } finally {
-            $env:BURNBAN_SYNC_URL = $PreviousUrl
+    if (-not $SkipEnroll) {
+        if ($AccountToken -or -not (Test-Path -LiteralPath $StatePath)) {
+            $Ledger = if ($env:BURNBAN_DB) { $env:BURNBAN_DB } else { Join-Path ([Environment]::GetFolderPath("UserProfile")) ".burnban\burnban.db" }
+            if (-not (Test-Path -LiteralPath $Ledger -PathType Leaf)) {
+                throw "Initialize the free meter first with: burnban setup --if-needed --no-launch"
+            }
+            $PreviousUrl = $env:BURNBAN_SYNC_URL
+            try {
+                $env:BURNBAN_SYNC_URL = $ServerUrl
+                if ($AccountToken) {
+                    # Verify every token-authenticated install or upgrade before
+                    # registering the token-free supervisor.
+                    $env:BURNBAN_SYNC_ACCOUNT_TOKEN = $AccountToken
+                    & $Binary --once
+                } else {
+                    $env:BURNBAN_SYNC_ACCOUNT_TOKEN = $null
+                    & $Binary --enroll
+                }
+                if ($LASTEXITCODE -ne 0) { throw "Paid Sync enrollment failed" }
+            } finally {
+                $env:BURNBAN_SYNC_URL = $PreviousUrl
+                $env:BURNBAN_SYNC_ACCOUNT_TOKEN = $null
+                $PreviousUrl = $null
+            }
         }
     }
+
+    # Scheduled processes must never see the one-time management credential.
+    $env:BURNBAN_SYNC_ACCOUNT_TOKEN = $null
+    $AccountToken = $null
 
     $UserId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $Action = New-ScheduledTaskAction -Execute $Binary
@@ -156,10 +250,26 @@ try {
 
     Write-Host "burnban-sync installed: $Binary" -ForegroundColor Green
     if (Test-Path -LiteralPath $StatePath) {
-        Write-Host "Personal Sync is enrolled and supervised for this user."
+        Write-Host "$Product is enrolled and supervised for this user."
     } else {
         Write-Host "Enrollment was skipped; the scheduled task will remain stopped until state exists."
     }
 } finally {
-    Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue
+    if ($Pointer -ne [IntPtr]::Zero) {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Pointer)
+        $Pointer = [IntPtr]::Zero
+    }
+    if ($null -ne $SecureToken) {
+        $SecureToken.Dispose()
+        $SecureToken = $null
+    }
+    # `irm ... | iex` evaluates in the caller's session. Clear every plaintext
+    # copy and the one-time environment credential on success and on failure.
+    $env:BURNBAN_SYNC_ACCOUNT_TOKEN = $null
+    $AccountToken = $null
+    $PreviousToken = $null
+    $PreviousUrl = $null
+    if (-not [string]::IsNullOrEmpty($Temp)) {
+        Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

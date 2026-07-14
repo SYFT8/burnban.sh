@@ -33,9 +33,30 @@ jobs:
           shellcheck install sync
           pwsh -NoLogo -NoProfile -Command \
             '[void][scriptblock]::Create((Get-Content -Raw install.ps1)); [void][scriptblock]::Create((Get-Content -Raw sync.ps1))'
-          grep -F 'Free meter available now · Sync release pending' index.html >/dev/null
-          grep -F 'is not buyer-accessible yet; retry after the published launch' sync >/dev/null
-          grep -F 'is not buyer-accessible yet; retry after the published launch' sync.ps1 >/dev/null
+          grep -F "VERSION_INPUT=\"\${BURNBAN_SYNC_VERSION:-v0.2.0}\"" sync >/dev/null
+          grep -F "\$VersionInput = if (\$env:BURNBAN_SYNC_VERSION) { \$env:BURNBAN_SYNC_VERSION } else { \"v0.2.0\" }" sync.ps1 >/dev/null
+          grep -F 'pst_*)' sync >/dev/null
+          grep -F 'tst_*)' sync >/dev/null
+          grep -F 'pst_[A-Za-z0-9_-]{16,}' sync.ps1 >/dev/null
+          grep -F 'tst_[A-Za-z0-9_-]{16,}' sync.ps1 >/dev/null
+          grep -F 'pst_ Personal or tst_ Team management token' sync >/dev/null
+          grep -F 'pst_ Personal or tst_ Team management token' sync.ps1 >/dev/null
+          grep -F "/api/v1/\$release_product/releases/\$VERSION" sync >/dev/null
+          grep -F "/api/v1/\$ReleaseProduct/releases/\$Version" sync.ps1 >/dev/null
+          grep -F 'Authorization: Bearer %s' sync >/dev/null
+          grep -F "Authorization = \"Bearer \$AccountToken\"" sync.ps1 >/dev/null
+          grep -F -- '--max-redirs 0' sync >/dev/null
+          grep -F -- '-MaximumRedirection 0' sync.ps1 >/dev/null
+          if grep -Eqi \
+            'not live yet|Sync release pending|release host pending|not buyer-accessible yet|retry after the published launch' \
+            sync sync.ps1; then
+            echo "paid installer contains stale pending-release copy" >&2
+            exit 1
+          fi
+          if grep -Fq 'github.com/SYFT8/burnban.dev/releases/download' sync sync.ps1; then
+            echo "paid installers must use the authenticated release API" >&2
+            exit 1
+          fi
           if git grep -n -i -E 'ph[cx]_|posthog[.]com' -- .; then
             echo "PostHog token or endpoint must not be present in the current installer site" >&2
             exit 1

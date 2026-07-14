@@ -1,11 +1,11 @@
 #!/bin/sh
-# Burnban Personal Sync installer for macOS and Linux.
+# Burnban paid Sync installer for macOS and Linux.
 set -eu
 umask 077
 
-RELEASE_REPO="SYFT8/burnban.dev"
-VERSION="${BURNBAN_SYNC_VERSION:-v0.1.0}"
-BASE_URL="${BURNBAN_SYNC_DOWNLOAD_BASE_URL:-https://github.com/$RELEASE_REPO/releases/download/burnban-sync-$VERSION}"
+VERSION_INPUT="${BURNBAN_SYNC_VERSION:-v0.2.0}"
+BASE_URL="${BURNBAN_SYNC_DOWNLOAD_BASE_URL:-}"
+TEST_ALLOW_REMOTE_BASE_URL="${BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL:-false}"
 BIN_DIR="${BURNBAN_SYNC_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/burnban-sync"
 STATE_PATH="${BURNBAN_SYNC_STATE:-$HOME/.burnban/personal-sync.json}"
@@ -22,10 +22,12 @@ Installs or upgrades burnban-sync and configures a per-user LaunchAgent on
 macOS or systemd user service on Linux. Uninstall preserves enrollment state.
 
 Environment:
-  BURNBAN_SYNC_VERSION=...            release version (default: v0.1.0)
-  BURNBAN_SYNC_DOWNLOAD_BASE_URL=...  HTTPS URL or local artifact directory
+  BURNBAN_SYNC_VERSION=...            release version (default: v0.2.0)
+  BURNBAN_SYNC_DOWNLOAD_BASE_URL=...  authenticated HTTPS URL or local artifact directory
   BURNBAN_SYNC_INSTALL_DIR=...        binary directory (default: ~/.local/bin)
   BURNBAN_SYNC_URL=...                enrollment service URL
+  BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL=true
+                                       test-only opt-in for a non-production HTTPS artifact URL
 EOF
 }
 
@@ -37,6 +39,41 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+case "$TEST_ALLOW_REMOTE_BASE_URL" in
+  true|false) ;;
+  *)
+    echo "burnban-sync: BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL must be true or false" >&2
+    exit 2 ;;
+esac
+
+normalize_version() {
+  normalized=$1
+  case "$normalized" in
+    v*) normalized=${normalized#v} ;;
+  esac
+  printf '%s\n' "$normalized" |
+    LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' || return 1
+  printf '%s\n' "$normalized"
+}
+
+sync_binary_version() {
+  binary_output=$("$1" --version 2>/dev/null) || return 1
+  case "$binary_output" in
+    'burnban-sync '*) binary_version=${binary_output#burnban-sync } ;;
+    *) return 1 ;;
+  esac
+  normalize_version "$binary_version"
+}
+
+is_sync_binary() {
+  [ -x "$1" ] && sync_binary_version "$1" >/dev/null
+}
+
+is_requested_sync_binary() {
+  actual_version=$(sync_binary_version "$1") || return 1
+  [ "$actual_version" = "$REQUESTED_VERSION" ]
+}
 
 reject_newline() {
   case "$1" in
@@ -92,7 +129,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
   if [ -e "$BIN_PATH" ]; then
-    if [ -x "$BIN_PATH" ] && "$BIN_PATH" --version 2>/dev/null | grep -q '^burnban-sync '; then
+    if is_sync_binary "$BIN_PATH"; then
       rm -f "$BIN_PATH"
     else
       echo "burnban-sync: refusing to remove a file that is not burnban-sync: $BIN_PATH" >&2
@@ -102,6 +139,12 @@ if [ "$UNINSTALL" -eq 1 ]; then
   echo "burnban-sync removed; enrollment state retained at $STATE_PATH"
   exit 0
 fi
+
+REQUESTED_VERSION=$(normalize_version "$VERSION_INPUT") || {
+  echo "burnban-sync: BURNBAN_SYNC_VERSION must be a release version such as v0.2.0" >&2
+  exit 2
+}
+VERSION="v$REQUESTED_VERSION"
 
 ARCHIVE="burnban-sync_${OS}_${ARCH}.tar.gz"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/burnban-sync-install.XXXXXX")
@@ -118,14 +161,61 @@ fetch() {
     https://*) ;;
     *) echo "burnban-sync: remote downloads must use HTTPS" >&2; exit 1 ;;
   esac
-  curl --fail --location --silent --show-error --proto '=https' \
-    --proto-redir '=https' --tlsv1.2 \
-    "$BASE_URL/$name" -o "$destination"
+  # Feed the paid credential through curl's standard input. It never appears
+  # in a URL, command argument, shell history, or on-disk curl config.
+  printf 'header = "Authorization: Bearer %s"\n' "$ACCOUNT_TOKEN" |
+    curl --config - --fail --silent --show-error --proto '=https' --tlsv1.2 \
+      --max-redirs 0 \
+      "$BASE_URL/$name" -o "$destination"
 }
+
+ACCOUNT_TOKEN="${BURNBAN_SYNC_ACCOUNT_TOKEN:-}"
+PRODUCT="Paid Sync"
+if [ ! -d "$BASE_URL" ]; then
+  if [ -z "$ACCOUNT_TOKEN" ]; then
+    if ! saved_tty=$(stty -g </dev/tty 2>/dev/null); then
+      echo "burnban-sync: a terminal is required to authenticate the paid download" >&2
+      exit 1
+    fi
+    printf 'Paste the pst_ Personal or tst_ Team management token (input hidden): ' >/dev/tty
+    trap 'stty "$saved_tty" </dev/tty 2>/dev/null || true; rm -rf "$TMP"' EXIT HUP INT TERM
+    stty -echo </dev/tty
+    IFS= read -r ACCOUNT_TOKEN </dev/tty || {
+      stty "$saved_tty" </dev/tty
+      printf '\n' >/dev/tty
+      echo "burnban-sync: could not read the paid account token" >&2
+      exit 1
+    }
+    stty "$saved_tty" </dev/tty
+    printf '\n' >/dev/tty
+    trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+  fi
+  case "$ACCOUNT_TOKEN" in
+    pst_*) token_body=${ACCOUNT_TOKEN#pst_}; PRODUCT="Personal Sync"; release_product=personal ;;
+    tst_*) token_body=${ACCOUNT_TOKEN#tst_}; PRODUCT="Team Sync"; release_product=team ;;
+    *) echo "burnban-sync: a valid pst_ Personal or tst_ Team management token is required" >&2; exit 1 ;;
+  esac
+  case "$token_body" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "burnban-sync: a valid paid management token is required" >&2
+      exit 1 ;;
+  esac
+  if [ "${#token_body}" -lt 16 ]; then
+    echo "burnban-sync: a valid paid management token is required" >&2
+    exit 1
+  fi
+  if [ -z "$BASE_URL" ]; then
+    BASE_URL="https://sync.burnban.dev/api/v1/$release_product/releases/$VERSION"
+  elif [ "$BASE_URL" != "https://sync.burnban.dev/api/v1/$release_product/releases/$VERSION" ] &&
+       [ "$TEST_ALLOW_REMOTE_BASE_URL" != true ]; then
+    echo "burnban-sync: refusing to send a paid token to a non-production artifact URL; only tests may set BURNBAN_SYNC_TEST_ALLOW_REMOTE_BASE_URL=true" >&2
+    exit 1
+  fi
+fi
 
 echo "Downloading burnban-sync $VERSION for $OS/$ARCH..."
 if ! fetch checksums.txt "$TMP/checksums.txt"; then
-  echo "burnban-sync: release $VERSION is not buyer-accessible yet; retry after the published launch" >&2
+  echo "burnban-sync: the paid account could not download release $VERSION" >&2
   exit 1
 fi
 fetch "$ARCHIVE" "$TMP/$ARCHIVE"
@@ -154,12 +244,12 @@ if [ ! -f "$candidate" ]; then
   exit 1
 fi
 chmod 755 "$candidate"
-if ! "$candidate" --version 2>/dev/null | grep -q '^burnban-sync '; then
-  echo "burnban-sync: downloaded executable failed validation" >&2
+if ! is_requested_sync_binary "$candidate"; then
+  echo "burnban-sync: downloaded executable is not the requested release $VERSION" >&2
   exit 1
 fi
 
-if [ -e "$BIN_PATH" ] && { [ ! -x "$BIN_PATH" ] || ! "$BIN_PATH" --version 2>/dev/null | grep -q '^burnban-sync '; }; then
+if [ -e "$BIN_PATH" ] && ! is_sync_binary "$BIN_PATH"; then
   echo "burnban-sync: refusing to replace a file that is not burnban-sync: $BIN_PATH" >&2
   exit 1
 fi
@@ -173,21 +263,36 @@ stage="$BIN_DIR/.burnban-sync.$$"
 cp "$candidate" "$stage"
 chmod 755 "$stage"
 mv -f "$stage" "$BIN_PATH"
-
-if [ ! -f "$STATE_PATH" ] && [ "$SKIP_ENROLL" != 1 ]; then
-  ledger="${BURNBAN_DB:-$HOME/.burnban/burnban.db}"
-  if [ ! -f "$ledger" ]; then
-    echo "burnban-sync: initialize the free meter first with: burnban setup --if-needed --no-launch" >&2
-    exit 1
-  fi
-  if [ ! -r /dev/tty ]; then
-    echo "burnban-sync: enrollment requires an interactive terminal" >&2
-    exit 1
-  fi
-  # The installer is commonly run as `curl ... | sh`, so stdin belongs to the
-  # script pipe. Reconnect only the hidden enrollment prompt to the terminal.
-  BURNBAN_SYNC_URL="$SERVER_URL" "$BIN_PATH" --enroll </dev/tty
+if ! is_requested_sync_binary "$BIN_PATH"; then
+  echo "burnban-sync: installed executable is not the requested release $VERSION" >&2
+  exit 1
 fi
+
+if [ "$SKIP_ENROLL" != 1 ]; then
+  if [ -n "$ACCOUNT_TOKEN" ] || [ ! -f "$STATE_PATH" ]; then
+    ledger="${BURNBAN_DB:-$HOME/.burnban/burnban.db}"
+    if [ ! -f "$ledger" ]; then
+      echo "burnban-sync: initialize the free meter first with: burnban setup --if-needed --no-launch" >&2
+      exit 1
+    fi
+    # The installer is commonly run as `curl ... | sh`, so stdin belongs to the
+    # script pipe. Reconnect only the hidden enrollment prompt to the terminal.
+    # A supplied token always performs one transient-token sync, including on
+    # upgrades, so the newly installed client is verified before supervision.
+    if [ -n "$ACCOUNT_TOKEN" ]; then
+      BURNBAN_SYNC_ACCOUNT_TOKEN="$ACCOUNT_TOKEN" BURNBAN_SYNC_URL="$SERVER_URL" "$BIN_PATH" --once
+    else
+      if [ ! -r /dev/tty ]; then
+        echo "burnban-sync: enrollment requires an interactive terminal" >&2
+        exit 1
+      fi
+      BURNBAN_SYNC_URL="$SERVER_URL" "$BIN_PATH" --enroll </dev/tty
+    fi
+  fi
+fi
+
+ACCOUNT_TOKEN=
+unset ACCOUNT_TOKEN
 
 mkdir -p "$(dirname "$SERVICE_PATH")" "$HOME/.burnban"
 if [ "$OS" = darwin ]; then
@@ -215,7 +320,7 @@ else
   cat >"$SERVICE_PATH" <<EOF
 # Burnban installer managed service
 [Unit]
-Description=Burnban Personal Sync
+Description=Burnban Paid Sync
 After=network-online.target
 Wants=network-online.target
 
@@ -241,7 +346,7 @@ fi
 
 echo "burnban-sync installed: $BIN_PATH"
 if [ -f "$STATE_PATH" ]; then
-  echo "Personal Sync is enrolled and supervised for this user."
+  echo "$PRODUCT is enrolled and supervised for this user."
 else
   echo "Enrollment was skipped; the supervisor will remain stopped until state exists."
 fi
