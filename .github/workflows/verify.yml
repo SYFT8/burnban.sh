@@ -33,6 +33,12 @@ jobs:
           shellcheck install sync
           pwsh -NoLogo -NoProfile -Command \
             '[void][scriptblock]::Create((Get-Content -Raw install.ps1)); [void][scriptblock]::Create((Get-Content -Raw sync.ps1))'
+          grep -F '".burnban-stage-"' install.ps1 >/dev/null
+          grep -F 'Write-Warning "Could not launch Burnban binary' install.ps1 >/dev/null
+          if grep -Fq '".burnban-install-"' install.ps1; then
+            echo "free Windows installer uses an elevation-prone staging filename" >&2
+            exit 1
+          fi
           grep -F "VERSION_INPUT=\"\${BURNBAN_SYNC_VERSION:-v0.2.0}\"" sync >/dev/null
           grep -F "\$VersionInput = if (\$env:BURNBAN_SYNC_VERSION) { \$env:BURNBAN_SYNC_VERSION } else { \"v0.2.0\" }" sync.ps1 >/dev/null
           grep -F 'pst_*)' sync >/dev/null
